@@ -1,70 +1,68 @@
-import joblib
 import pandas as pd
-import numpy as np
+from peer_benchmarks import PeerBenchmarkEngine
+from llm_advisor import ESGAdvisor
 
 class ESGCalculator:
     def __init__(self, data):
         self.data = data
         self.scores = {"environmental": 0, "social": 0, "governance": 0, "total": 0}
         self.recommendations = []
+        self.brsr_mapping = {"P1": [], "P2": [], "P3": [], "P4": [], "P5": [], "P6": [], "P7": [], "P8": [], "P9": []}
         
-        # --- LOAD AI ---
-        try:
-            self.model = joblib.load('esg_benchmark_model.pkl')
-            self.model_loaded = True
-        except:
-            print("WARNING: Model not found. Using fallbacks.")
-            self.model_loaded = False
-
         self.industry_map = {
-            "IT/Services": 0, "Manufacturing": 1, "Retail": 2, 
-            "Cement/Steel": 3, "Pharma": 4
+            "Banking/Financial": {"E": 0.1, "S": 0.4, "G": 0.5},
+            "IT/Services": {"E": 0.2, "S": 0.5, "G": 0.3},
+            "Pharma/Healthcare": {"E": 0.4, "S": 0.3, "G": 0.3},
+            "Chemicals": {"E": 0.5, "S": 0.2, "G": 0.3},
+            "FMCG": {"E": 0.4, "S": 0.3, "G": 0.3},
+            "Automobile": {"E": 0.5, "S": 0.3, "G": 0.2},
+            "Energy/Power": {"E": 0.6, "S": 0.2, "G": 0.2},
+            "Cement/Steel": {"E": 0.6, "S": 0.2, "G": 0.2},
+            "Textiles": {"E": 0.4, "S": 0.4, "G": 0.2},
+            "Telecom": {"E": 0.2, "S": 0.4, "G": 0.4},
+            "Construction": {"E": 0.5, "S": 0.3, "G": 0.2},
+            "Mining": {"E": 0.6, "S": 0.2, "G": 0.2},
+            "Aviation": {"E": 0.6, "S": 0.2, "G": 0.2},
+            "Retail": {"E": 0.3, "S": 0.4, "G": 0.3},
+            "Logistics": {"E": 0.5, "S": 0.3, "G": 0.2}
         }
         
-        # Default Weights
-        self.base_weights = {"E": 0.4, "S": 0.3, "G": 0.3}
-        self._adjust_weights_for_industry()
-
-    def _adjust_weights_for_industry(self):
-        # Dynamic Weighting based on Industry Risk
         ind = self.data['company_profile']['industry']
-        if ind in ["Cement/Steel", "Pharma"]:
-            self.base_weights = {"E": 0.6, "S": 0.2, "G": 0.2}
-        elif ind == "IT/Services":
-            self.base_weights = {"E": 0.2, "S": 0.5, "G": 0.3}
-
-    def _get_ai_benchmark(self, revenue, employees, industry_str):
-        if not self.model_loaded: return max(1, revenue * 0.005)
-        
-        industry_code = self.industry_map.get(industry_str, 1)
-        input_df = pd.DataFrame([[revenue, employees, industry_code]], 
-                                columns=['revenue', 'employees', 'industry_type'])
-        return max(1.0, self.model.predict(input_df)[0])
+        self.base_weights = self.industry_map.get(ind, {"E": 0.33, "S": 0.33, "G": 0.34})
 
     def _calculate_environmental(self):
         env = self.data['environmental']
         prof = self.data['company_profile']
         score = 0
         
-        # 1. AI Benchmark Efficiency
-        predicted = self._get_ai_benchmark(prof['annual_revenue_inr'], prof['total_employees'], prof['industry'])
-        actual = max(1, env['total_energy_consumption_kwh'])
+        rev = max(1, prof['annual_revenue_inr'] / 10000000)
         
-        if actual <= predicted:
-            score += 50
+        scope1 = env.get('scope_1_emissions_mt', 0)
+        scope2 = env.get('scope_2_emissions_mt', 0)
+        scope3 = env.get('scope_3_emissions_mt', 0)
+        total_emissions = scope1 + scope2 + scope3
+        
+        if total_emissions > 0:
+            intensity = total_emissions / rev
+            score += min(40, max(0, 40 - (intensity * 2)))
+            self.brsr_mapping["P6"].append({"metric": "GHG Emissions", "value": total_emissions})
         else:
-            excess = (actual - predicted) / predicted
-            score += max(0, 50 * (1 - excess))
-            if excess > 0.2:
-                self.recommendations.append(f"High Energy Usage: {int(excess*100)}% above industry standard.")
+            self.recommendations.append("Missing Scope 1/2/3 emissions data.")
 
-        # 2. Renewables
-        ren_pct = (env['renewable_energy_kwh'] / actual) * 100
-        score += min(30, (ren_pct / 30) * 30)
+        water = env.get('total_water_consumption_liters', 0)
+        if water > 0:
+            water_intensity = water / rev
+            score += min(20, max(0, 20 - (water_intensity / 1000)))
+            self.brsr_mapping["P6"].append({"metric": "Water Intensity", "value": water_intensity})
+        
+        actual_energy = max(1, env.get('total_energy_consumption_kwh', 1))
+        ren_pct = (env.get('renewable_energy_kwh', 0) / actual_energy) * 100
+        score += min(20, (ren_pct / 40) * 20)
+        self.brsr_mapping["P6"].append({"metric": "Renewable Energy %", "value": ren_pct})
 
-        # 3. Waste
-        gen = max(1, env['waste_generated_kg'])
-        score += (env['waste_recycled_kg'] / gen) * 20
+        gen = max(1, env.get('waste_generated_kg', 1))
+        score += (env.get('waste_recycled_kg', 0) / gen) * 20
+        self.brsr_mapping["P6"].append({"metric": "Waste Recycled %", "value": (env.get('waste_recycled_kg', 0) / gen) * 100})
             
         self.scores['environmental'] = round(score, 2)
 
@@ -73,26 +71,37 @@ class ESGCalculator:
         total_emp = max(1, self.data['company_profile']['total_employees'])
         score = 0
         
-        # 1. Diversity
-        div_pct = (soc['female_employees'] / total_emp) * 100
-        score += min(40, (div_pct / 40) * 40)
+        div_pct = (soc.get('female_employees', 0) / total_emp) * 100
+        score += min(20, (div_pct / 40) * 20)
+        self.brsr_mapping["P3"].append({"metric": "Female Employee %", "value": div_pct})
         
-        # 2. Safety (IMPROVED: Exponential Decay)
-        # 0 accidents = 30 pts. 
-        # 1 accident = 20 pts. 
-        # 5+ accidents = 0 pts.
-        accidents = soc['safety_accidents_count']
+        dis_pct = (soc.get('employees_with_disabilities', 0) / total_emp) * 100
+        score += min(10, (dis_pct / 5) * 10)
+        self.brsr_mapping["P3"].append({"metric": "Employees with Disabilities %", "value": dis_pct})
+
+        accidents = soc.get('safety_accidents_count', 0)
         if accidents == 0:
+            score += 20
+        else:
+            score += max(0, 20 - (accidents * 5))
+            self.recommendations.append(f"Safety Alert: {accidents} accidents reported.")
+        self.brsr_mapping["P3"].append({"metric": "Safety Accidents", "value": accidents})
+
+        train_pct = (soc.get('employees_trained_count', 0) / total_emp) * 100
+        score += min(20, (train_pct / 80) * 20)
+        self.brsr_mapping["P3"].append({"metric": "Employees Trained %", "value": train_pct})
+
+        harassment = soc.get('complaints_received_sexual_harassment', 0)
+        resolved = soc.get('complaints_resolved_sexual_harassment', 0)
+        
+        if harassment == 0:
             score += 30
         else:
-            # Penalize heavily for the first few accidents
-            safety_score = max(0, 30 - (accidents * 10))
-            score += safety_score
-            self.recommendations.append(f"CRITICAL: {accidents} Safety accident(s) reported. Immediate audit required.")
-
-        # 3. Training
-        train_pct = (soc['employees_trained_count'] / total_emp) * 100
-        score += min(30, (train_pct / 50) * 30)
+            resolution_rate = resolved / harassment
+            score += (resolution_rate * 30)
+            if resolution_rate < 1:
+                self.recommendations.append(f"POSH Alert: {harassment - resolved} unresolved sexual harassment complaints.")
+        self.brsr_mapping["P5"].append({"metric": "POSH Complaints", "value": harassment})
 
         self.scores['social'] = min(100, round(score, 2))
 
@@ -100,17 +109,25 @@ class ESGCalculator:
         gov = self.data['governance']
         score = 0
         
-        # Policies
-        score += min(50, len(gov['policies_implemented']) * 15)
+        policies = len(gov.get('policies_implemented', []))
+        score += min(30, policies * 10)
+        self.brsr_mapping["P1"].append({"metric": "Policies Implemented", "value": policies})
         
-        # Fines
-        if gov['regulatory_fines_paid_inr'] == 0: score += 30
-        else: self.recommendations.append("Compliance Alert: Regulatory fines detected.")
+        if gov.get('regulatory_fines_paid_inr', 0) == 0:
+            score += 30
+        else:
+            self.recommendations.append("Compliance Alert: Regulatory fines detected.")
+        self.brsr_mapping["P1"].append({"metric": "Regulatory Fines", "value": gov.get('regulatory_fines_paid_inr', 0)})
         
-        # Committee
-        if gov['has_sustainability_committee']: score += 20
+        if gov.get('has_sustainability_committee', False):
+            score += 20
+        self.brsr_mapping["P7"].append({"metric": "Sustainability Committee", "value": gov.get('has_sustainability_committee', False)})
         
-        self.scores['governance'] = round(score, 2)
+        if gov.get('brsr_filing_status', False):
+            score += 20
+        self.brsr_mapping["P1"].append({"metric": "BRSR Filing", "value": gov.get('brsr_filing_status', False)})
+        
+        self.scores['governance'] = min(100, round(score, 2))
 
     def compute(self):
         self._calculate_environmental()
@@ -122,8 +139,52 @@ class ESGCalculator:
                 (self.scores['social'] * w['S']) + \
                 (self.scores['governance'] * w['G'])
         
-        # Re-normalize to 100 base
-        total_weight = w['E'] + w['S'] + w['G']
-        self.scores['total'] = round(final / total_weight, 2)
+        self.scores['total'] = round(final, 2)
         
-        return {"scores": self.scores, "recommendations": self.recommendations}
+        revenue_cr = self.data['company_profile']['annual_revenue_inr'] / 10000000
+        total_emp = max(1, self.data['company_profile']['total_employees'])
+        actual_energy = max(1, self.data['environmental'].get('total_energy_consumption_kwh', 1))
+        
+        peer_input_metrics = {
+            "total_ghg": self.data['environmental'].get('scope_1_emissions_mt', 0) + \
+                         self.data['environmental'].get('scope_2_emissions_mt', 0) + \
+                         self.data['environmental'].get('scope_3_emissions_mt', 0),
+            "water_liters": self.data['environmental'].get('total_water_consumption_liters', 0),
+            "renewable_pct": (self.data['environmental'].get('renewable_energy_kwh', 0) / actual_energy) * 100,
+            "female_pct": (self.data['social'].get('female_employees', 0) / total_emp) * 100
+        }
+        
+        benchmark_engine = PeerBenchmarkEngine()
+        peer_ranks = benchmark_engine.get_peer_ranking(
+            self.data['company_profile']['industry'], 
+            revenue_cr, 
+            peer_input_metrics
+        )
+        
+        ind_name = self.data['company_profile']['industry']
+        company_name = self.data.get('company_name', 'The Company')
+        
+        peer_narratives = [
+            f"Carbon Footprint: You rank better than {peer_ranks['ghg_intensity_percentile']}% of {ind_name} peers.",
+            f"Water Efficiency: You rank better than {peer_ranks['water_intensity_percentile']}% of {ind_name} peers.",
+            f"Workforce Diversity: Your female representation is better than {peer_ranks['diversity_percentile']}% of the market."
+        ]
+        
+        advisor = ESGAdvisor()
+        ai_recommendations = advisor.generate_recommendations(
+            company_name=company_name,
+            industry=ind_name,
+            scores=self.scores,
+            metrics=peer_input_metrics,
+            benchmarks=peer_ranks
+        )
+        
+        final_recommendations = self.recommendations + ai_recommendations
+        
+        return {
+            "scores": self.scores, 
+            "recommendations": final_recommendations,
+            "brsr_mapping": self.brsr_mapping,
+            "peer_benchmarks": peer_ranks,
+            "peer_narratives": peer_narratives
+        }
