@@ -129,7 +129,7 @@ class ESGCalculator:
         
         self.scores['governance'] = min(100, round(score, 2))
 
-    def compute(self):
+    async def compute(self):
         self._calculate_environmental()
         self._calculate_social()
         self._calculate_governance()
@@ -171,7 +171,7 @@ class ESGCalculator:
         ]
         
         advisor = ESGAdvisor()
-        ai_recommendations = advisor.generate_recommendations(
+        ai_recommendations = await advisor.generate_recommendations(
             company_name=company_name,
             industry=ind_name,
             scores=self.scores,

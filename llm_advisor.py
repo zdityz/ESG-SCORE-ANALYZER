@@ -1,10 +1,11 @@
 import ollama
+import asyncio
 
 class ESGAdvisor:
     def __init__(self, model_name='llama3.2'):
         self.model_name = model_name
 
-    def generate_recommendations(self, company_name, industry, scores, metrics, benchmarks):
+    async def generate_recommendations(self, company_name, industry, scores, metrics, benchmarks):
         prompt = f"""
         You are an elite ESG (Environmental, Social, and Governance) consultant. 
         Analyze the following company data and provide exactly 3 highly specific, actionable recommendations to improve their ESG performance.
@@ -27,18 +28,14 @@ class ESGAdvisor:
         """
         
         try:
-            response = ollama.chat(
+            client = ollama.AsyncClient()
+            response = await client.chat(
                 model=self.model_name,
                 messages=[{'role': 'user', 'content': prompt}]
             )
-
             raw_text = response['message']['content']
             recs = [line.strip().lstrip('*-• ') for line in raw_text.split('\n') if line.strip()]
             return recs[:3]
         except Exception as e:
             print(f"Ollama Error: {e}")
-            return [
-                "Increase renewable energy purchasing agreements.",
-                "Conduct a gender diversity audit in hiring pipelines.",
-                "Implement stricter Scope 3 emissions tracking."
-            ]
+            return ["Increase renewable energy purchasing agreements.", "Conduct a gender diversity audit.", "Implement stricter tracking."]

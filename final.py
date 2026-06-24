@@ -4,16 +4,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import List, Literal
 from sqlalchemy.orm import Session
-
 from esg_engine import ESGCalculator 
 from file_parser import parse_document
 from database import engine, get_db
 import db_models
-
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter
 from reportlab.lib import colors
 from reportlab.lib.utils import ImageReader
+from reportlab.platypus import Paragraph
+from reportlab.lib.styles import getSampleStyleSheet
 import matplotlib
 import matplotlib.pyplot as plt
 import io
@@ -28,8 +28,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-db_models.Base.metadata.create_all(bind=engine)
 
 class CompanyProfile(BaseModel):
     industry: Literal[
@@ -99,41 +97,56 @@ def create_pdf_report(data):
     buffer = io.BytesIO()
     c = canvas.Canvas(buffer, pagesize=letter)
     width, height = letter
+    styles = getSampleStyleSheet()
     c.setFillColor(colors.darkblue)
     c.rect(0, height-100, width, 100, fill=1, stroke=0)
     c.setFillColor(colors.white)
     c.setFont("Helvetica-Bold", 24)
     c.drawString(50, height-60, "ESG & BRSR AUDIT REPORT")
+
     c.setFillColor(colors.black)
     c.setFont("Helvetica-Bold", 16)
     c.drawString(50, height-150, "Executive Summary")
     c.setFont("Helvetica", 14)
     c.drawString(50, height-180, f"Total Score: {data['scores']['total']} / 100")
     c.drawString(50, height-200, f"Industry: {data['company_profile']['industry']}")
+
     graph_buf = get_radar_chart_bytes(data['scores'])
     c.drawImage(ImageReader(graph_buf), 300, height-350, 250, 250, mask='auto')
     y = height-380
     c.setFont("Helvetica-Bold", 14)
     c.drawString(50, y, "Actionable Alerts & Recommendations:")
-    c.setFont("Helvetica", 10)
-    y -= 25
+    y -= 20
+    
+    style = styles["Normal"]
+    style.fontName = "Helvetica"
+    style.fontSize = 10
+    style.leading = 14
+    
     if not data['recommendations']:
-        c.drawString(50, y, "• Excellent Compliance. No critical alerts detected.")
-        y -= 20
+        p = Paragraph("• Excellent Compliance. No critical alerts detected.", style)
+        w, h = p.wrap(width - 100, height)
+        y -= h
+        p.drawOn(c, 50, y)
     else:
         for rec in data['recommendations']:
-            c.drawString(50, y, f"• {rec}")
-            y -= 20
+            p = Paragraph(f"• {rec}", style)
+            w, h = p.wrap(width - 100, height) 
+            y -= h
+            p.drawOn(c, 50, y)
+            y -= 10
             
-    y -= 10
+    y -= 20
     c.setFont("Helvetica-Bold", 14)
     c.drawString(50, y, "NSE/BSE Top 1000 Peer Benchmarking:")
-    y -= 25
-    c.setFont("Helvetica", 10)
+    y -= 20
     for narrative in data.get('peer_narratives', []):
-        c.drawString(50, y, f"★ {narrative}")
-        y -= 20
-
+        p = Paragraph(f"★ {narrative}", style)
+        w, h = p.wrap(width - 100, height)
+        y -= h
+        p.drawOn(c, 50, y)
+        y -= 10
+            
     y -= 15
     c.setFont("Helvetica-Bold", 14)
     c.drawString(50, y, "BRSR Principle Mapping Highlights:")
@@ -151,6 +164,7 @@ def create_pdf_report(data):
                 c.drawString(70, y, f"- {item['metric']}: {val}")
                 y -= 15
             y -= 5 
+
             if y < 50:
                 c.showPage()
                 y = height - 50
@@ -159,27 +173,26 @@ def create_pdf_report(data):
     buffer.seek(0)
     return buffer
 
-
 @app.post("/calculate_score")
-def calculate_esg(request: ESGRequest):
+async def calculate_esg(request: ESGRequest):
     try:
-        return ESGCalculator(request.dict()).compute()
+        return await ESGCalculator(request.dict()).compute()
     except Exception as e:
         raise HTTPException(500, str(e))
 
 @app.post("/generate_graph")
-def generate_graph(request: ESGRequest):
+async def generate_graph(request: ESGRequest):
     try:
-        res = ESGCalculator(request.dict()).compute()
+        res = await ESGCalculator(request.dict()).compute()
         return StreamingResponse(get_radar_chart_bytes(res['scores']), media_type="image/png")
     except Exception as e:
         raise HTTPException(500, str(e))
 
 @app.post("/generate_report")
-def generate_report(request: ESGRequest):
+async def generate_report(request: ESGRequest):
     try:
         req_data = request.dict()
-        res = ESGCalculator(req_data).compute()
+        res = await ESGCalculator(req_data).compute()
         res['company_profile'] = req_data['company_profile']
         
         pdf_buffer = create_pdf_report(res)
@@ -190,7 +203,6 @@ def generate_report(request: ESGRequest):
             headers={"Content-Disposition": "attachment; filename=esg_brsr_report.pdf"}
         )
     except Exception as e:
-        print(e)
         raise HTTPException(500, str(e))
 
 @app.post("/extract_from_file")
@@ -224,7 +236,7 @@ async def extract_from_file(files: List[UploadFile] = File(...)):
     return combined_data
 
 @app.post("/submit_brsr")
-def submit_brsr(request: SubmissionRequest, db: Session = Depends(get_db)):
+async def submit_brsr(request: SubmissionRequest, db: Session = Depends(get_db)):
     company = db.query(db_models.Company).filter(db_models.Company.cin == request.cin).first()
     
     if not company:
@@ -238,7 +250,7 @@ def submit_brsr(request: SubmissionRequest, db: Session = Depends(get_db)):
         db.refresh(company)
 
     calc = ESGCalculator(request.esg_data.dict())
-    results = calc.compute()
+    results = await calc.compute()
     
     total_fields = 15
     filled_fields = 0
